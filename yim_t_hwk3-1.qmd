@@ -1,0 +1,351 @@
+---
+title: "Homework 3"
+subtitle: "Research Methods, Spring 2024"
+author: "Taeyoung Yim"
+format:
+  pdf:
+    output-file: "yim-t-hwk3-3"
+    output-ext:  "pdf"
+    header-includes:
+      - \usepackage{float}
+      - \floatplacement{table}{H}
+---
+
+```{r}
+#| include: false
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggplot2, dplyr, lubridate, readr, readxl, hrbrthemes, fixest,
+               scales, gganimate, gapminder, gifski, png, tufte, plotly, OECD,
+               ggrepel, survey, foreign, devtools, pdftools, kableExtra, modelsummary,
+               kableExtra)
+```
+
+```{r}
+#| include: false
+#| eval: true
+cig.data <- read_csv("data/input/cdcdata.csv", col_names = TRUE)
+cpi.data <- read_xlsx("data/input/cpidata.xlsx", skip = 11)
+
+
+# Clean tobacco data --------------------------------------------------------------
+cig.data <- cig.data %>%
+  mutate(measure = case_when(
+    SubMeasureDesc == "Average Cost per pack" ~ "cost_per_pack",
+    SubMeasureDesc == "Cigarette Consumption (Pack Sales Per Capita)" ~ "sales_per_capita",
+    SubMeasureDesc == "Federal and State tax as a Percentage of Retail Price" ~ "tax_percent",
+    SubMeasureDesc == "Federal and State Tax per pack" ~ "tax_dollar",
+    SubMeasureDesc == "Gross Cigarette Tax Revenue" ~ "tax_revenue",
+    SubMeasureDesc == "State Tax per pack" ~ "tax_state"
+  )) %>%
+  select(state_abb = LocationAbbr, 
+         state = LocationDesc, 
+         Year, 
+         value=Data_Value, 
+         measure)
+         
+final.data <- pivot_wider(cig.data, 
+                         id_cols = c("state","Year"),
+                         names_from = "measure",
+                         values_from = "value") %>%
+  arrange(state, Year)
+
+
+
+# Clean CPI data ----------------------------------------------------------
+cpi.data <- pivot_longer(cpi.data, 
+                         cols=c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),
+                         names_to="month",
+                         values_to="index")
+cpi.data <- cpi.data %>%
+  group_by(Year) %>%
+  summarize(index=mean(index, na.rm=TRUE))
+
+
+
+# Form final dataset ------------------------------------------------------
+# adjust to 2010 dollars
+final.data <- final.data %>%
+  left_join(cpi.data, by="Year") %>%
+  mutate(price_cpi=cost_per_pack*(218/index))
+
+write_tsv(final.data,"data/output/TaxBurden_Data.txt",append=FALSE,col_names=TRUE)
+write_rds(final.data,"data/output/TaxBurden_Data.rds")
+
+```
+
+```{r,  echo = FALSE}
+cig.data <- readRDS('data/output/TaxBurden_Data.rds')
+
+cig.data <- cig.data %>% group_by(state) %>% arrange(state, Year) %>%
+  mutate(tax_change = tax_state - lag(tax_state),
+  tax_change_d = ifelse(tax_change == 0,0,1),
+  price_cpi_2012 = cost_per_pack*(218/index),
+  total_tax_cpi_2012 = tax_dollar*(218/index),
+  ln_tax_2012 = log(total_tax_cpi_2012),
+  ln_sales = log(sales_per_capita),
+  ln_price_2012 = log(price_cpi_2012)
+  )
+```
+
+\newpage
+# Summarize the Data
+Answer the following based on the enrollment data:
+\vspace{.2in}
+\noindent 1. Present a bar graph showing the proportion of states with a change in their cigarette tax in each year from 1970 to 1985.<br>
+```{r,  echo = FALSE}
+tax.change.plot <- cig.data %>% 
+  filter(Year >= 1970 & Year <= 1985) %>% 
+  group_by(Year) %>% 
+  summarize(mean_change = mean(tax_change_d)) %>%
+  ggplot(aes(x = as.factor(Year), y = mean_change)) + 
+  geom_bar(stat = "identity", fill = "black") +
+  labs(title = "Proportion of States with Change in Cigarette Tax (1970-1985)",
+       x = "Year",
+       y = "Proportion of States with Change") +
+  theme_minimal()
+tax.change.plot
+```
+
+\newpage
+\vspace{.2in}
+\noindent 2. Plot on a single graph the average tax (in 2012 dollars) on cigarettes and the average price of a pack of cigarettes from 1970 to 2018.<br>
+```{r,  echo = FALSE}
+library(ggplot2)
+
+# Plotting average tax and price
+tax_price_plot <- cig.data %>%
+  filter(Year >= 1970 & Year <= 2018) %>%
+  group_by(Year) %>%
+  summarize(avg_tax_2012 = mean(total_tax_cpi_2012),
+            avg_price_2012 = mean(price_cpi_2012)) %>%
+  ggplot(aes(x = Year)) +
+  geom_line(aes(y = avg_tax_2012, color = "Average Tax (2012 dollars)")) +
+  geom_line(aes(y = avg_price_2012, color = "Average Price (2012 dollars)")) +
+  scale_color_manual(values = c("Average Tax (2012 dollars)" = "blue",
+                                 "Average Price (2012 dollars)" = "red")) +
+  labs(title = "Average Tax and Price of Cigarettes (1970-2018)",
+       x = "Year",
+       y = "Amount (2012 dollars)",
+       color = "Variable") +
+  theme_minimal()
+
+tax_price_plot
+```
+
+\newpage
+\vspace{.2in}
+\noindent 3.Identify the 5 states with the highest increases in cigarette prices (in dollars) over the time period. Plot the average number of packs sold per capita for those states from 1970 to 2018.<br>
+```{r,  echo = FALSE}
+library(dplyr)
+library(ggplot2)
+
+
+price_increase <- cig.data %>%
+  group_by(state) %>%
+  summarize(price_increase = max(price_cpi_2012) - min(price_cpi_2012)) %>%
+  arrange(desc(price_increase)) %>%
+  top_n(5)
+
+top_5_states <- price_increase$state
+
+# Step 3: Filter cig.data for the top 5 states
+top_5_data <- cig.data %>%
+  filter(state %in% top_5_states)
+
+# Step 4: Plot the average number of packs sold per capita for these states
+packs_sold_plot <- top_5_data %>%
+  group_by(Year, state) %>%
+  summarize(avg_packs_sold = mean(sales_per_capita)) %>%
+  ggplot(aes(x = Year, y = avg_packs_sold, color = state)) +
+  geom_line() +
+  labs(title = "Average Packs Sold per Capita (1970-2018)",
+       x = "Year",
+       y = "Average Packs Sold per Capita") +
+  theme_minimal()
+
+packs_sold_plot
+```
+
+\newpage
+\vspace{.2in}
+\noindent 4.Identify the 5 states with the lowest increases in cigarette prices over the time period. Plot the average number of packs sold per capita for those states from 1970 to 2018.<br>
+```{r,  echo = FALSE}
+library(ggplot2)
+library(dplyr)
+
+price_increase <- final.data %>%
+  filter(Year >= 1970 & Year <= 2018) %>%
+  group_by(state) %>%
+  summarize(price_increase = max(cost_per_pack) - min(cost_per_pack))
+
+bottom_5_states <- price_increase %>%
+  arrange(price_increase) %>%
+  head(5)
+
+filtered_data <- final.data %>%
+  filter(state %in% bottom_5_states$state)
+
+ggplot(filtered_data, aes(x = Year, y = sales_per_capita, group = state, color = state)) +
+  geom_line() +
+  labs(title = "Average Packs Sold Per Capita for States with Lowest Price Increases",
+       x = "Year",
+       y = "Average Packs Sold Per Capita",
+       color = "State") +
+  theme_minimal()
+
+```
+
+\newpage
+\vspace{.2in}
+\noindent 5.Compare the trends in sales from the 5 states with the highest price increases to those with the lowest price increases.<br>
+```{r, echo = FALSE}
+# Get the bottom 5 states
+bottom_5_states <- tail(price_increase$state, 5)
+
+# Calculate average packs sold per capita for bottom 5 states
+bottom_5_data <- cig.data %>%
+  filter(state %in% bottom_5_states) %>%
+  group_by(Year) %>%
+  summarize(avg_sales_per_capita = mean(sales_per_capita))
+
+# Calculate average packs sold per capita for top 5 states
+top_5_data <- cig.data %>%
+  filter(state %in% top_5_states) %>%
+  group_by(Year) %>%
+  summarize(avg_sales_per_capita = mean(sales_per_capita))
+
+# Plot the comparison of sales trends
+sales_comparison_plot <- ggplot() +
+  geom_line(data = bottom_5_data, aes(x = Year, y = avg_sales_per_capita, color = "Bottom 5 States"), linetype = "dashed") +
+  geom_line(data = top_5_data, aes(x = Year, y = avg_sales_per_capita, color = "Top 5 States"), linetype = "solid") +
+  labs(title = "Comparison of Sales Trends between Top 5 and Bottom 5 States based on Price Increases",
+       x = "Year",
+       y = "Average Packs Sold per Capita",
+       color = "Group",
+       linetype = "Group") +
+  scale_color_manual(values = c("Top 5 States" = "blue", "Bottom 5 States" = "red")) +
+  theme_minimal()
+
+sales_comparison_plot
+```
+\newpage
+# Estimate ATEs
+Now let’s work on estimating a demand curve for cigarettes. Specifically, we’re going to estimate the price elasticity of demand for cigarettes. When explaining your findings, try to limit your discussion just to a couple of sentences.
+\vspace{.2in}
+\noindent 6.Focusing only on the time period from 1970 to 1990, regress log sales on log prices to estimate the price elasticity of demand over that period. Interpret your results.<br>
+
+```{r, echo=FALSE}
+library(fixest)
+library(dplyr)
+
+ols1 <- feols(ln_sales~ln_price_2012, data = cig.data %>% filter(Year<1991))
+
+ols1
+```
+
+The coefficient estimate of -0.809 for ln_price_2012 (p < 0.001) indicates that there is a substantial negative correlation between cigarette sales and pricing. This means that reduced sales correlated to increased cigarette prices. 
+
+\newpage
+\vspace{.2in}
+\noindent 7.Again limiting to 1970 to 1990, regress log sales on log prices using the total (federal and state) cigarette tax (in dollars) as an instrument for log prices. Interpret your results and compare your estimates to those without an instrument. Are they different? If so, why?<br>
+
+```{r, echo=FALSE}
+library(fixest)
+library(dplyr)
+
+iv1 <- feols(ln_sales~1 | ln_price_2012~ln_tax_2012, data = cig.data %>% filter(Year<1991))
+
+iv1
+```
+With an estimated coefficient of -0.796 (p < 0.001), the Two-Stage Least Squares (TSLS) estimation shows a similar negative correlation between ln_sales and the instrumented variable, fit_ln_price_2012. It indicates that lower sales are associated with higher prices, which are instrumented by ln_tax_2012. The coefficients for ln_price_2012 are fairly similar to the OLS estimates (-0.809 in OLS vs. -0.796 in TSLS), suggesting that the results from the two models are consistent. In addition, the Wu-Hausman test result (p = 0.817) indicates there is no significant difference between the OLS and TSLS estimations, showing that the instrument does not have endogeneity problems.
+
+\newpage
+\vspace{.2in}
+\noindent 8.Show the first stage and reduced-form results from the instrument.<br>
+```{r,  echo = FALSE}
+library(fixest)
+library(dplyr)
+# First Stage Regression: Total Cigarette Tax (Instrument) on Cigarette Prices
+first.stage <- feols(ln_price_2012~ln_tax_2012, data = cig.data %>% filter(Year<1991))
+
+# Reduced-Form Regression: Total Cigarette Tax (Instrument) on Cigarette Sales per Capita
+reduced.form <- feols(ln_sales~ln_tax_2012, data = cig.data %>% filter(Year<1991))
+
+# Summary of the first stage regression with title
+cat("First Stage Regression Summary\n")
+summary(first.stage)
+
+# Summary of the reduced form regression with title
+cat("\nReduced Form Regression Summary\n")
+summary(reduced.form)
+
+```
+
+\newpage
+\vspace{.2in}
+\noindent 9.Repeat questions 1-3 focusing on the period from 1991 to 2015.<br>
+```{r,  echo = FALSE}
+library(fixest)
+library(dplyr)
+
+ols2 <- feols(ln_sales~ln_price_2012, data = cig.data %>% filter(Year>=1991 & Year<=2015))
+iv2 <- feols(ln_sales~1 | ln_price_2012~ln_tax_2012, data = cig.data %>% filter(Year>=1991 & Year<=2015))
+first.stage2 <- feols(ln_price_2012~ln_tax_2012, data = cig.data %>% filter(Year>=1991 & Year<=2015))
+reduced.form2 <- feols(ln_sales~ln_tax_2012, data = cig.data %>% filter(Year>=1991 & Year<=2015))
+
+# Summary of OLS regression for the second time period with title
+cat("OLS Regression Summary\n")
+summary(ols2)
+
+# Summary of IV regression for the second time period with title
+cat("\nIV Regression Summary\n")
+summary(iv2)
+
+# Summary of first stage regression for the second time period with title
+cat("\nFirst Stage Regression Summary\n")
+summary(first.stage2)
+
+# Summary of reduced form regression for the second time period with title
+cat("\nReduced Form Regression Summary\n")
+summary(reduced.form2)
+
+```
+
+\newpage
+\vspace{.2in}
+\noindent 10.Compare your elasticity estimates from 1970-1990 versus those from 1991-2015. Are they different? If so, why?<br>
+```{r,  echo = FALSE}
+# Filter cig.data for the period from 1970 to 1990
+filtered_data_1970_1990 <- cig.data %>%
+  filter(Year >= 1970 & Year <= 1990)
+
+# Perform log-log regression of log sales on log prices for the period from 1970 to 1990
+elasticity_regression_1970_1990 <- lm(log(sales_per_capita) ~ log(price_cpi_2012), data = filtered_data_1970_1990)
+
+# Extract elasticity coefficient
+elasticity_coef_1970_1990 <- coef(elasticity_regression_1970_1990)[2]
+
+# Print elasticity coefficient for 1970-1990
+cat("\nelasticity coefficient for 1970-1990\n")
+elasticity_coef_1970_1990
+
+# Filter cig.data for the period from 1991 to 2015
+filtered_data_1991_2015 <- cig.data %>%
+  filter(Year >= 1991 & Year <= 2015)
+
+# Perform log-log regression of log sales on log prices for the period from 1991 to 2015
+elasticity_regression_1991_2015 <- lm(log(sales_per_capita) ~ log(price_cpi_2012), data = filtered_data_1991_2015)
+
+# Extract elasticity coefficient
+elasticity_coef_1991_2015 <- coef(elasticity_regression_1991_2015)[2]
+
+# Print elasticity coefficient for 1991-2015
+cat("\nelasticity coefficient for 1991-2015\n")
+elasticity_coef_1991_2015
+
+
+
+```
+There is a variance in the elasticity estimations. Policy measures such as cigarette taxes are likely the cause of the discrepancy.
+
